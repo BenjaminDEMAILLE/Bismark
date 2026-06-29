@@ -490,11 +490,9 @@ pub fn resolve(cli: &Cli, command_line: String) -> Result<RunConfig> {
                 "--illumina_5base is not supported with --slam.".into(),
             ));
         }
-        if cli.fasta {
-            return Err(AlignerError::Unsupported(
-                "--illumina_5base requires FASTQ input in v1 (drop --fasta).".into(),
-            ));
-        }
+        // FastA (`-f`) input is supported: the 5-Base SE/PE drivers read 2-line records and
+        // synthesize a Phred-40 quality (the aligner reads FastA natively). `--five_base_baseq`
+        // masking is then a no-op (no real per-base quality to threshold).
         // --multicore N is honoured: it sets the single aligner instance's thread count
         // (minimap2 -t N / bowtie2,hisat2 -p N), the HISAT2 --multicore→-p precedent.
         if cli.combined_index || cli.combined_index_sequential || cli.combined_index_single_pass {

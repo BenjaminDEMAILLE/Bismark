@@ -112,7 +112,9 @@ pub struct Cli {
     /// plus 1 spacer of the Illumina 5-Base `OverrideCycles U7N1Y#`). When greater than
     /// zero, reads are deduplicated by (UMI, chromosome, position, strand): PCR/optical
     /// duplicates are dropped (the first survives), removing methylation bias. 0 = off
-    /// (the default; the aligner soft-clips any UMI bases). Requires `--illumina_5base`.
+    /// (the default; the aligner soft-clips any UMI bases). When > 0 a runtime check warns
+    /// loudly if the aligner did NOT soft-clip the UMI prefix (minimap2 `-x sr` /
+    /// bowtie2/hisat2 `--local` do), since the model relies on it. Requires `--illumina_5base`.
     #[arg(long = "five_base_umi_len", value_name = "int", default_value_t = 0)]
     pub five_base_umi_len: usize,
     /// `[#787]` Minimum Phred base quality for a 5-Base methylation call. Read bases

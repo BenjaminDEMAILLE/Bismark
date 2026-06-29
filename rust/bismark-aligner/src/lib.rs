@@ -1328,11 +1328,20 @@ fn five_base_align_and_call(
     let (skip, upto) = (config.read_processing.skip, config.read_processing.upto);
     let (mut id, mut seq, mut plus, mut qual) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut count: u64 = 0;
+    // FastA input (`-f`): 2-line records (`>id` / seq, no quality). minimap2 reads FastA
+    // natively; we synthesize a Phred-40 (`I`) quality so the call/baseq path is uniform.
+    let is_fasta = matches!(config.format, ReadFormat::FastA);
     // #787 UMI dedup: drop reads sharing (UMI, chrom, pos, strand). 0 ⇒ off.
     let umi_len = config.five_base_umi_len;
     let mut seen: std::collections::HashSet<(Vec<u8>, String, u32, u16)> =
         std::collections::HashSet::new();
     let mut dups: u64 = 0;
+    // #1035 nit 2: count mapped reads whose 5' UMI bases were NOT soft-clipped by the aligner.
+    let mut softclip_bad: u64 = 0;
+    // #1035 nit 1b: drop low-MAPQ reads from the PRIMARY BAM too (not only the consensus pass),
+    // so --five_base_min_mapq filters mis-mapped repeat pile-ups out of the per-read calls.
+    let min_mapq = config.five_base_min_mapq;
+    let mut lowmapq: u64 = 0;
     loop {
         id.clear();
         seq.clear();
@@ -1340,10 +1349,16 @@ fn five_base_align_and_call(
         qual.clear();
         let n1 = reader.read_until(b'\n', &mut id)?;
         let n2 = reader.read_until(b'\n', &mut seq)?;
-        let n3 = reader.read_until(b'\n', &mut plus)?;
-        let n4 = reader.read_until(b'\n', &mut qual)?;
-        if n1 == 0 || n2 == 0 || n3 == 0 || n4 == 0 {
-            break;
+        if is_fasta {
+            if n1 == 0 || n2 == 0 {
+                break;
+            }
+        } else {
+            let n3 = reader.read_until(b'\n', &mut plus)?;
+            let n4 = reader.read_until(b'\n', &mut qual)?;
+            if n1 == 0 || n2 == 0 || n3 == 0 || n4 == 0 {
+                break;
+            }
         }
         count += 1;
         if let Some(s) = skip
@@ -1367,10 +1382,18 @@ fn five_base_align_and_call(
         // Force whitespace truncation (icpc semantics) regardless of `--icpc` so the
         // lockstep qname check matches; underscoring the comment would desync every read.
         let fixed = convert::fix_id(convert::chomp_newline(&id), true);
-        let id_bytes = fixed.strip_prefix(b"@").unwrap_or(&fixed);
+        let id_bytes = fixed
+            .strip_prefix(b"@")
+            .or_else(|| fixed.strip_prefix(b">")) // FastA headers start with `>`
+            .unwrap_or(&fixed);
         let identifier = String::from_utf8_lossy(id_bytes).into_owned();
         let seq_uc: Vec<u8> = convert::chomp_newline(&seq).to_ascii_uppercase();
-        let qual_bytes: Vec<u8> = convert::chomp_newline(&qual).to_vec();
+        // FastA has no quality line — synthesize Phred 40 (`I`) so masking is a no-op.
+        let qual_bytes: Vec<u8> = if is_fasta {
+            vec![b'I'; seq_uc.len()]
+        } else {
+            convert::chomp_newline(&qual).to_vec()
+        };
 
         let rec = five_base_next_primary(&mut sam, &mut sam_line)?.ok_or_else(|| {
             AlignerError::Validation(format!(
@@ -1384,9 +1407,23 @@ fn five_base_align_and_call(
             )));
         }
 
+        // #1035 nit 1b MAPQ filter (mapped reads only): drop a read below --five_base_min_mapq
+        // before it is emitted or enters the UMI set (DRAGEN drops alt reads at MAPQ < 20).
+        // Unmapped reads (MAPQ undefined) fall through to the --unmapped FastQ unchanged.
+        if min_mapq > 0 && rec.flag & 0x4 == 0 && rec.mapq < min_mapq {
+            lowmapq += 1;
+            continue;
+        }
+
         // UMI dedup (mapped reads only): drop a read whose (UMI, chrom, pos, strand)
         // was already seen (a PCR/optical duplicate); the first survives.
         if umi_len > 0 && rec.flag & 0x4 == 0 {
+            if umi_softclip_violation(&rec.cigar, rec.flag, umi_len) {
+                if softclip_bad == 0 {
+                    warn_umi_softclip(&identifier, &rec.cigar, umi_len);
+                }
+                softclip_bad += 1;
+            }
             let umi: Vec<u8> = seq_uc.iter().take(umi_len).copied().collect();
             if !seen.insert((umi, rec.rname.clone(), rec.pos, rec.flag & 0x10)) {
                 dups += 1;
@@ -1423,7 +1460,7 @@ fn five_base_align_and_call(
                 let seq_orig = convert::chomp_newline(&seq).to_vec();
                 write_se_aux_record(
                     w,
-                    false,
+                    is_fasta,
                     identifier.as_bytes(),
                     &seq_orig,
                     &plus,
@@ -1439,8 +1476,18 @@ fn five_base_align_and_call(
             "minimap2 exited with status {status}"
         )));
     }
+    if min_mapq > 0 {
+        eprintln!("5-Base MAPQ filter (min_mapq {min_mapq}): dropped {lowmapq} low-MAPQ read(s).");
+    }
     if umi_len > 0 {
         eprintln!("5-Base UMI dedup (umi_len {umi_len}): removed {dups} duplicate read(s).");
+        if softclip_bad > 0 {
+            eprintln!(
+                "WARNING (#787 5-Base): {softclip_bad} mapped read(s) lacked a read-5' soft-clip \
+                 >= --five_base_umi_len ({umi_len}); their UMI bases were also aligned, so 5' \
+                 methylation for those reads may be unreliable. Verify the aligner soft-clips the UMI."
+            );
+        }
     }
     Ok(())
 }
@@ -1485,6 +1532,65 @@ fn mask_low_quality(seq: &[u8], qual: &[u8], baseq: u8, offset: u8) -> Vec<u8> {
             _ => b,
         })
         .collect()
+}
+
+/// Length of a leading soft-clip (`<n>S…`) in a SAM CIGAR string, else 0.
+fn leading_softclip_len(cigar: &str) -> u32 {
+    let digits = cigar.len() - cigar.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 {
+        return 0;
+    }
+    match cigar.as_bytes().get(digits) {
+        Some(&b'S') => cigar[..digits].parse().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Length of a trailing soft-clip (`…<n>S`) in a SAM CIGAR string, else 0.
+fn trailing_softclip_len(cigar: &str) -> u32 {
+    let Some(rest) = cigar.strip_suffix('S') else {
+        return 0;
+    };
+    let digits = rest.len() - rest.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 {
+        return 0;
+    }
+    rest[rest.len() - digits..].parse().unwrap_or(0)
+}
+
+/// Soft-clip length at the READ 5' end. minimap2 reports the CIGAR in reference-forward
+/// orientation, so a reverse-mapped read's 5' soft-clip lands at the CIGAR tail. For the
+/// inline-UMI model (`--five_base_umi_len`) the UMI is taken from the read's 5' bases, so
+/// this is the clip that must cover it.
+fn read5p_softclip_len(cigar: &str, flag: u16) -> u32 {
+    if flag & 0x10 != 0 {
+        trailing_softclip_len(cigar)
+    } else {
+        leading_softclip_len(cigar)
+    }
+}
+
+/// `--five_base_umi_len` precondition (#1035 nit 2). The inline UMI is the literal first
+/// `umi_len` read bases, while position/methylation derive from the alignment — so the UMI
+/// bases MUST be soft-clipped by the aligner (minimap2 `-x sr`, bowtie2/hisat2 `--local` do).
+/// A length guard cannot catch a missing clip (soft-clipping preserves query length), so
+/// without this a misconfigured aligner would silently double-use the UMI bases (UMI key AND
+/// aligned sequence), mis-calling 5' methylation. Returns `true` when the precondition is
+/// VIOLATED so callers can warn loudly (once) and tally it.
+fn umi_softclip_violation(cigar: &str, flag: u16, umi_len: usize) -> bool {
+    read5p_softclip_len(cigar, flag) < umi_len as u32
+}
+
+/// Loud, one-time warning when the inline-UMI soft-clip precondition is first violated.
+fn warn_umi_softclip(identifier: &str, cigar: &str, umi_len: usize) {
+    eprintln!(
+        "WARNING (#787 5-Base): read {identifier} primary CIGAR {cigar} has no read-5' \
+         soft-clip >= --five_base_umi_len ({umi_len}). The inline-UMI model assumes the aligner \
+         soft-clips the UMI prefix (minimap2 -x sr / bowtie2/hisat2 --local). Without it the \
+         first {umi_len} bases are used as BOTH the UMI key AND aligned sequence, so 5' \
+         methylation may be mis-called. Check the aligner profile (or use --five_base_umi_qname). \
+         Further such reads will be counted but not re-warned."
+    );
 }
 
 /// Turn one minimap2 primary [`SamRecord`] + the original read into a Bismark
@@ -1717,13 +1823,20 @@ fn five_base_align_and_call_pe(
     let mut r2 = open_maybe_gz(read_2)?;
     let (skip, upto) = (config.read_processing.skip, config.read_processing.upto);
     let mut count: u64 = 0;
+    // FastA input (`-f`): 2-line mates, synthesized Phred-40 quality (see `read_one_record`).
+    let is_fasta = matches!(config.format, ReadFormat::FastA);
     // #787 UMI dedup (PE): key on both mates' UMIs + the R1 chrom/pos/strand.
     let umi_len = config.five_base_umi_len;
     let mut seen: std::collections::HashSet<(Vec<u8>, Vec<u8>, String, u32, u16)> =
         std::collections::HashSet::new();
     let mut dups: u64 = 0;
-    while let Some((id1, seq1, _p1, qual1)) = read_fastq_record(&mut r1)? {
-        let Some((_id2, seq2, _p2, qual2)) = read_fastq_record(&mut r2)? else {
+    // #1035 nit 2: count proper pairs where either mate's 5' UMI bases were NOT soft-clipped.
+    let mut softclip_bad: u64 = 0;
+    // #1035 nit 1b: drop low-MAPQ proper pairs from the PRIMARY BAM (pair MAPQ = min of mates).
+    let min_mapq = config.five_base_min_mapq;
+    let mut lowmapq: u64 = 0;
+    while let Some((id1, seq1, _p1, qual1)) = read_one_record(&mut r1, is_fasta)? {
+        let Some((_id2, seq2, _p2, qual2)) = read_one_record(&mut r2, is_fasta)? else {
             break;
         };
         count += 1;
@@ -1759,16 +1872,40 @@ fn five_base_align_and_call_pe(
         // QNAME at the first space, so the real Illumina header's `1:N:0:` comment must be
         // dropped here too or every pair desyncs.
         let fixed = convert::fix_id(convert::chomp_newline(&id1), true);
-        let id_bytes = fixed.strip_prefix(b"@").unwrap_or(&fixed);
+        let id_bytes = fixed
+            .strip_prefix(b"@")
+            .or_else(|| fixed.strip_prefix(b">")) // FastA headers start with `>`
+            .unwrap_or(&fixed);
         let identifier = strip_mate_suffix(&String::from_utf8_lossy(id_bytes));
         let seq1_uc: Vec<u8> = convert::chomp_newline(&seq1).to_ascii_uppercase();
         let seq2_uc: Vec<u8> = convert::chomp_newline(&seq2).to_ascii_uppercase();
         let qual1_bytes: Vec<u8> = convert::chomp_newline(&qual1).to_vec();
         let qual2_bytes: Vec<u8> = convert::chomp_newline(&qual2).to_vec();
 
+        // #1035 nit 1b MAPQ filter (proper pairs only): drop a pair whose lower mate MAPQ is
+        // below --five_base_min_mapq before it is emitted or enters the UMI set. The pair MAPQ
+        // is the min of the two mates, matching BestAlignmentPaired.mapq and the consensus walk.
+        if min_mapq > 0
+            && rec1.flag & 0x2 != 0
+            && rec1.flag & 0x4 == 0
+            && rec2.flag & 0x4 == 0
+            && rec1.mapq.min(rec2.mapq) < min_mapq
+        {
+            lowmapq += 1;
+            continue;
+        }
+
         // UMI dedup (proper pairs only): drop a pair whose (R1 UMI, R2 UMI, chrom,
         // R1 pos, R1 strand) was already seen.
         if umi_len > 0 && rec1.flag & 0x2 != 0 && rec1.flag & 0x4 == 0 {
+            if umi_softclip_violation(&rec1.cigar, rec1.flag, umi_len)
+                || umi_softclip_violation(&rec2.cigar, rec2.flag, umi_len)
+            {
+                if softclip_bad == 0 {
+                    warn_umi_softclip(&identifier, &rec1.cigar, umi_len);
+                }
+                softclip_bad += 1;
+            }
             let u1: Vec<u8> = seq1_uc.iter().take(umi_len).copied().collect();
             let u2: Vec<u8> = seq2_uc.iter().take(umi_len).copied().collect();
             if !seen.insert((u1, u2, rec1.rname.clone(), rec1.pos, rec1.flag & 0x10)) {
@@ -1813,8 +1950,18 @@ fn five_base_align_and_call_pe(
             "minimap2 exited with status {status}"
         )));
     }
+    if min_mapq > 0 {
+        eprintln!("5-Base MAPQ filter (min_mapq {min_mapq}): dropped {lowmapq} low-MAPQ pair(s).");
+    }
     if umi_len > 0 {
         eprintln!("5-Base UMI dedup (umi_len {umi_len}): removed {dups} duplicate pair(s).");
+        if softclip_bad > 0 {
+            eprintln!(
+                "WARNING (#787 5-Base): {softclip_bad} proper pair(s) had a mate without a read-5' \
+                 soft-clip >= --five_base_umi_len ({umi_len}); UMI bases were also aligned, so 5' \
+                 methylation for those reads may be unreliable. Verify the aligner soft-clips the UMI."
+            );
+        }
     }
     Ok(())
 }
@@ -2691,6 +2838,28 @@ fn read_fastq_record<R: BufRead>(
         return Ok(None);
     }
     Ok(Some((id, seq, plus, qual)))
+}
+
+/// Read one SE/PE-mate record as `(id, seq, plus, qual)`, FastQ (4-line) or FastA
+/// (2-line). For FastA the `plus` is empty and `qual` is a synthesized Phred-40 (`I`)
+/// string the length of the (newline-chomped) sequence, so the downstream 5-Base call /
+/// `--five_base_baseq` masking treats FastA reads as full-quality.
+#[allow(clippy::type_complexity)]
+fn read_one_record<R: BufRead>(
+    reader: &mut R,
+    is_fasta: bool,
+) -> Result<Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)>> {
+    if !is_fasta {
+        return read_fastq_record(reader);
+    }
+    let (mut id, mut seq) = (Vec::new(), Vec::new());
+    let n1 = reader.read_until(b'\n', &mut id)?;
+    let n2 = reader.read_until(b'\n', &mut seq)?;
+    if n1 == 0 || n2 == 0 {
+        return Ok(None);
+    }
+    let qual = vec![b'I'; convert::chomp_newline(&seq).len()];
+    Ok(Some((id, seq, Vec::new(), qual)))
 }
 
 /// Strip a trailing `/1` or `/2` mate suffix from a read id (minimap2 reports the
@@ -6930,6 +7099,41 @@ mod tests {
         assert!(out.is_none());
         assert_eq!(c.no_single_alignment_found, 1);
         assert_eq!(c.unique_best_alignment_count, 0);
+    }
+
+    /// #1035 nit 2: CIGAR soft-clip accessors. Leading/trailing parse the edge `S` op only
+    /// (0 when the edge op is not a soft-clip), and `read5p_softclip_len` flips to the tail
+    /// for a reverse-mapped read (minimap2 reports CIGAR in reference-forward orientation).
+    #[test]
+    fn five_base_softclip_helpers() {
+        assert_eq!(leading_softclip_len("8S143M"), 8);
+        assert_eq!(leading_softclip_len("143M"), 0);
+        assert_eq!(leading_softclip_len("143M8S"), 0); // trailing, not leading
+        assert_eq!(leading_softclip_len("10M2I5S"), 0);
+        assert_eq!(trailing_softclip_len("143M8S"), 8);
+        assert_eq!(trailing_softclip_len("8S143M"), 0);
+        assert_eq!(trailing_softclip_len("143M"), 0);
+        // forward read (flag 0): 5' clip is the leading op.
+        assert_eq!(read5p_softclip_len("8S143M", 0), 8);
+        // reverse read (flag 0x10): 5' clip lands at the CIGAR tail.
+        assert_eq!(read5p_softclip_len("143M8S", 0x10), 8);
+        assert_eq!(read5p_softclip_len("8S143M", 0x10), 0);
+    }
+
+    /// The inline-UMI precondition fires (violation) only when the read-5' soft-clip is
+    /// shorter than `umi_len`, accounting for read orientation.
+    #[test]
+    fn five_base_umi_softclip_violation_detects_missing_clip() {
+        // forward read, full UMI soft-clipped → OK.
+        assert!(!umi_softclip_violation("8S143M", 0, 8));
+        // forward read, clip too short → violation.
+        assert!(umi_softclip_violation("3S148M", 0, 8));
+        // forward read, no clip at all → violation.
+        assert!(umi_softclip_violation("151M", 0, 8));
+        // reverse read, UMI clip at the tail → OK.
+        assert!(!umi_softclip_violation("143M8S", 0x10, 8));
+        // reverse read, clip on the wrong (leading) end → violation.
+        assert!(umi_softclip_violation("8S143M", 0x10, 8));
     }
 
     /// A proper FR pair (R1 forward FLAG 99, R2 reverse FLAG 147) → PE index 0 (OT);

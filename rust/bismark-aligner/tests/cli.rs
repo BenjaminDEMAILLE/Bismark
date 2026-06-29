@@ -5649,6 +5649,134 @@ fn five_base_umi_dedup_drops_duplicates() {
     );
 }
 
+/// A fake `minimap2` for the 5-Base path that sets per-read MAPQ: a read whose name
+/// contains `low` maps at MAPQ 5, every other read at MAPQ 60 — so a `--five_base_min_mapq`
+/// threshold can be exercised end-to-end. Otherwise identical to the plain 5-Base fake.
+#[cfg(unix)]
+fn make_fake_minimap2_five_base_mapq(dir: &Path) {
+    let script = r#"#!/bin/sh
+case "$*" in *--version*) echo "2.31-r1302"; exit 0;; esac
+inp=""
+for a in "$@"; do
+  case "$a" in *.fastq|*.fq) inp="$a" ;; esac
+done
+printf '@HD\tVN:1.0\n@SQ\tSN:chr1\tLN:8\n'
+awk 'NR%4==1 { id=$1; sub(/^@/,"",id); mq=60; if (id ~ /low/) mq=5 } NR%4==2 { print id "\t0\tchr1\t1\t" mq "\t6M\t*\t0\t0\t" $0 "\tFFFFFF\tNM:i:1\tAS:i:10\tMD:Z:1C4" }' "$inp"
+"#;
+    write_exec(&dir.join("minimap2"), script);
+}
+
+/// `--five_base_min_mapq N` drops low-MAPQ reads from the PRIMARY BAM (#1035 nit 1b), not
+/// only the consensus pass. Two reads map (fake minimap2): `r_hi` at MAPQ 60 (kept) and
+/// `r_low` at MAPQ 5 (dropped at threshold 20). The BAM ends with 1 record and the run
+/// reports "dropped 1 low-MAPQ read".
+#[cfg(unix)]
+#[test]
+fn five_base_min_mapq_filters_primary_bam() {
+    let genome = TempDir::new().unwrap();
+    make_genome_mmi(genome.path());
+    let bins = TempDir::new().unwrap();
+    make_fake_minimap2_five_base_mapq(bins.path());
+    let read = genome.path().join("reads.fq");
+    fs::write(
+        &read,
+        b"@r_hi\nATGTAC\n+\nIIIIII\n@r_low\nATGTAC\n+\nIIIIII\n",
+    )
+    .unwrap();
+    let temp = TempDir::new().unwrap();
+    let outdir = TempDir::new().unwrap();
+
+    bin()
+        .arg("--genome")
+        .arg(genome.path())
+        .arg("--illumina_5base")
+        .arg("--five_base_min_mapq")
+        .arg("20")
+        .arg("--path_to_minimap2")
+        .arg(bins.path())
+        .arg("--temp_dir")
+        .arg(temp.path())
+        .arg("--output_dir")
+        .arg(outdir.path())
+        .arg(&read)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("dropped 1 low-MAPQ read"));
+
+    let mut reader =
+        bismark_io::BamReader::from_path(&outdir.path().join("reads_bismark_mm2.bam")).unwrap();
+    assert_eq!(
+        reader.records().count(),
+        1,
+        "one low-MAPQ read dropped → 1 record"
+    );
+}
+
+/// A fake `minimap2` for the 5-Base FastA path: reads a 2-line FastA (`>id` / seq),
+/// maps every read to chr1:1 (6M, FLAG 0, RNAME `chr1` UNCONVERTED) echoing the read SEQ.
+/// Locates the reads by the `.fa`/`.fasta` positional arg.
+#[cfg(unix)]
+fn make_fake_minimap2_five_base_fasta(dir: &Path) {
+    let script = r#"#!/bin/sh
+case "$*" in *--version*) echo "2.31-r1302"; exit 0;; esac
+inp=""
+for a in "$@"; do
+  case "$a" in *.fa|*.fasta) inp="$a" ;; esac
+done
+printf '@HD\tVN:1.0\n@SQ\tSN:chr1\tLN:8\n'
+awk '/^>/ { id=$1; sub(/^>/,"",id); next } { print id "\t0\tchr1\t1\t60\t6M\t*\t0\t0\t" $0 "\tFFFFFF\tNM:i:1\tAS:i:10\tMD:Z:1C4" }' "$inp"
+"#;
+    write_exec(&dir.join("minimap2"), script);
+}
+
+/// `--illumina_5base -f` (FastA input) end-to-end: a 2-line FastA read `ATGTAC` vs genome
+/// `ACGTACGT` produces the SAME inverted call as the FastQ case (`XM = .Z...z`), proving the
+/// 5-Base path reads 2-line records (synthesizing quality) rather than mis-reading FastQ.
+#[cfg(unix)]
+#[test]
+fn five_base_se_fasta_input_inverts_polarity() {
+    let genome = TempDir::new().unwrap();
+    make_genome_mmi(genome.path());
+    let bins = TempDir::new().unwrap();
+    make_fake_minimap2_five_base_fasta(bins.path());
+    let read = genome.path().join("reads.fa");
+    fs::write(&read, b">r1\nATGTAC\n").unwrap();
+    let temp = TempDir::new().unwrap();
+    let outdir = TempDir::new().unwrap();
+
+    bin()
+        .arg("--genome")
+        .arg(genome.path())
+        .arg("--illumina_5base")
+        .arg("-f")
+        .arg("--path_to_minimap2")
+        .arg(bins.path())
+        .arg("--temp_dir")
+        .arg(temp.path())
+        .arg("--output_dir")
+        .arg(outdir.path())
+        .arg(&read)
+        .assert()
+        .success();
+
+    // FastA inputs keep the `.fa` in the output stem (Perl convention; `strip_fastq_suffix`
+    // strips only `.fastq`/`.fq`), matching the bisulfite FastA path (`reads.fa_bismark_*`).
+    let report =
+        fs::read_to_string(outdir.path().join("reads.fa_bismark_mm2_SE_report.txt")).unwrap();
+    assert!(report.contains("Sequences analysed in total:\t1\n"));
+    assert!(report.contains("Mapping efficiency:\t100.0%\n"));
+
+    let mut reader =
+        bismark_io::BamReader::from_path(&outdir.path().join("reads.fa_bismark_mm2.bam")).unwrap();
+    let recs: Vec<_> = reader.records().map(|r| r.unwrap()).collect();
+    assert_eq!(recs.len(), 1, "one FastA read → one record");
+    let xm = bismark_io::tags::xm(recs[0].inner().data()).unwrap();
+    assert_eq!(
+        xm, b".Z...z",
+        "5-Base FastA: read T at a genomic CpG C = methylated Z, same as FastQ"
+    );
+}
+
 /// `--five_base_umi_len` without `--illumina_5base` fails loud.
 #[cfg(unix)]
 #[test]
