@@ -351,6 +351,9 @@ fn open_chunk_se_sinks(
         ambig_bam,
         unmapped: plain(unmapped)?,
         ambiguous: plain(ambiguous)?,
+        // Per-chunk temp BAM (merged + deleted) → no provenance sidecar; the merged
+        // output's sidecar is written by the orchestrator after `merge_bams`.
+        provenance: None,
     })
 }
 
@@ -388,6 +391,8 @@ fn open_chunk_pe_sinks(
         unmapped_2: plain(unmapped_2)?,
         ambiguous_1: plain(ambiguous_1)?,
         ambiguous_2: plain(ambiguous_2)?,
+        // Per-chunk temp BAM → no sidecar (see `open_chunk_sinks`).
+        provenance: None,
     })
 }
 
@@ -532,7 +537,11 @@ fn pe_chunk_job(
 /// nothing here needs the Bismark classification. noodles record-stream copy =
 /// byte-identical *decompressed* content to single-core (PLAN §3.4.1/Q3).
 fn merge_bams(final_path: &Path, header: &Header, parts: &[PathBuf]) -> Result<()> {
-    let mut writer = BamWriter::from_path(final_path, header.clone()).map_err(|e| {
+    // Reproducibility-by-design: the always-on `@CO bismark_provenance …` line rides in the
+    // merged header (worker-count-invariant: it depends only on argv/build, not the split).
+    let mut prov_header = header.clone();
+    crate::meta::provenance::add_bam_provenance(&mut prov_header, "bismark");
+    let mut writer = BamWriter::from_path(final_path, prov_header).map_err(|e| {
         AlignerError::Validation(format!("failed to open merged BAM {final_path:?}: {e}"))
     })?;
     for part in parts {
@@ -708,6 +717,11 @@ pub(crate) fn run_se_multicore(config: &RunConfig, reads: &[String], n: u32) -> 
         );
         let bams: Vec<PathBuf> = outcomes.iter().map(|o| o.bam.clone()).collect();
         merge_bams(&bam_path, &header, &bams)?;
+        crate::meta::provenance::write_for_output(
+            "bismark",
+            &bam_path,
+            crate::meta::provenance::stat_inputs([read_file]),
+        );
 
         if config.ambig_bam {
             let ap = crate::aligner::derive_output_path(
@@ -862,6 +876,11 @@ pub(crate) fn run_pe_multicore(
         );
         let bams: Vec<PathBuf> = outcomes.iter().map(|o| o.bam.clone()).collect();
         merge_bams(&bam_path, &header, &bams)?;
+        crate::meta::provenance::write_for_output(
+            "bismark",
+            &bam_path,
+            crate::meta::provenance::stat_inputs([read_1, read_2]),
+        );
 
         if config.ambig_bam {
             let ap = crate::aligner::derive_output_path(

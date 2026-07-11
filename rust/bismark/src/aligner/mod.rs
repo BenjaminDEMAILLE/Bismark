@@ -2135,7 +2135,11 @@ fn run_five_base_consensus(
         }
     }
 
-    let mut writer = crate::io::BamWriter::from_path(consensus_bam_path, header.clone())
+    // Reproducibility-by-design: always-on `@CO bismark_provenance …` in the consensus BAM
+    // (header not byte-compared; this path is opt-in / non-byte-identical anyway).
+    let mut prov_header = header.clone();
+    crate::meta::provenance::add_bam_provenance(&mut prov_header, "bismark");
+    let mut writer = crate::io::BamWriter::from_path(consensus_bam_path, prov_header)
         .map_err(|e| AlignerError::Validation(format!("consensus: create BAM: {e}")))?;
     let (mut emitted, mut skipped) = (0u64, 0u64);
 
@@ -2240,6 +2244,11 @@ fn run_five_base_consensus(
     writer
         .finish()
         .map_err(|e| AlignerError::Validation(format!("consensus: finalise BAM: {e}")))?;
+    crate::meta::provenance::write_for_output(
+        "bismark",
+        consensus_bam_path,
+        crate::meta::provenance::stat_inputs(bam_paths.iter().map(|p| p.to_path_buf())),
+    );
     eprintln!(
         "5-Base duplex consensus (PE): {emitted} consensus read(s) emitted, {skipped} family(ies) \
          skipped. BAM: {}",
@@ -2340,6 +2349,11 @@ struct Sinks {
     ambig_bam: Option<BamWriter<BufWriter<File>>>,
     unmapped: Option<AuxWriter>,
     ambiguous: Option<AuxWriter>,
+    // Reproducibility-by-design: for a REAL output BAM, the path + input read(s) so `finish`
+    // drops a `<bam>.bismark_provenance.json` sidecar next to it (new file → the BAM's
+    // byte-identity is untouched). `None` for per-chunk temp BAMs (merged + deleted → no
+    // sidecar).
+    provenance: Option<(PathBuf, Vec<crate::meta::provenance::ProvenanceInput>)>,
 }
 
 impl Sinks {
@@ -2359,6 +2373,10 @@ impl Sinks {
         if let Some(a) = self.ambiguous {
             a.finish()?;
         }
+        // Success path only: the BAM is fully flushed above.
+        if let Some((bam_path, inputs)) = self.provenance {
+            crate::meta::provenance::write_for_output("bismark", &bam_path, inputs);
+        }
         Ok(())
     }
 }
@@ -2370,7 +2388,13 @@ fn open_sinks(
     header: &noodles_sam::Header,
     bam_path: &Path,
 ) -> Result<Sinks> {
-    let bam = BamWriter::from_path(bam_path, header.clone())
+    // Reproducibility-by-design: augment the (byte-frozen) header with one always-on
+    // `@CO bismark_provenance …` line before writing. No gate byte-compares the header
+    // (records-only), so this is safe; `@PG VN:v0.25.1` is untouched.
+    let mut prov_header = header.clone();
+    crate::meta::provenance::add_bam_provenance(&mut prov_header, "bismark");
+
+    let bam = BamWriter::from_path(bam_path, prov_header.clone())
         .map_err(|e| AlignerError::Validation(format!("failed to open BAM {bam_path:?}: {e}")))?;
 
     let ambig_bam = if config.ambig_bam {
@@ -2381,7 +2405,7 @@ fn open_sinks(
             ".ambig.bam",
         );
         eprintln!("Ambiguous BAM output: {}", p.display());
-        Some(BamWriter::from_path(&p, header.clone()).map_err(|e| {
+        Some(BamWriter::from_path(&p, prov_header.clone()).map_err(|e| {
             AlignerError::Validation(format!("failed to open ambig BAM {p:?}: {e}"))
         })?)
     } else {
@@ -2416,6 +2440,10 @@ fn open_sinks(
         ambig_bam,
         unmapped,
         ambiguous,
+        provenance: Some((
+            bam_path.to_path_buf(),
+            crate::meta::provenance::stat_inputs([read_file]),
+        )),
     })
 }
 
@@ -4346,6 +4374,9 @@ struct PeSinks {
     unmapped_2: Option<AuxWriter>,
     ambiguous_1: Option<AuxWriter>,
     ambiguous_2: Option<AuxWriter>,
+    // Reproducibility-by-design (see `Sinks`): `Some((bam_path, [read_1, read_2]))` for a
+    // real output BAM, `None` for a per-chunk temp BAM.
+    provenance: Option<(PathBuf, Vec<crate::meta::provenance::ProvenanceInput>)>,
 }
 
 impl PeSinks {
@@ -4369,6 +4400,10 @@ impl PeSinks {
         {
             g.finish()?;
         }
+        // Success path only: the BAM is fully flushed above.
+        if let Some((bam_path, inputs)) = self.provenance {
+            crate::meta::provenance::write_for_output("bismark", &bam_path, inputs);
+        }
         Ok(())
     }
 }
@@ -4382,7 +4417,12 @@ fn open_pe_sinks(
     header: &noodles_sam::Header,
     bam_path: &Path,
 ) -> Result<PeSinks> {
-    let bam = BamWriter::from_path(bam_path, header.clone())
+    // Reproducibility-by-design: augment the byte-frozen header with the always-on
+    // `@CO bismark_provenance …` line (header not byte-compared by any gate).
+    let mut prov_header = header.clone();
+    crate::meta::provenance::add_bam_provenance(&mut prov_header, "bismark");
+
+    let bam = BamWriter::from_path(bam_path, prov_header.clone())
         .map_err(|e| AlignerError::Validation(format!("failed to open BAM {bam_path:?}: {e}")))?;
 
     let ambig_bam = if config.ambig_bam {
@@ -4393,7 +4433,7 @@ fn open_pe_sinks(
             "_pe.ambig.bam",
         );
         eprintln!("Ambiguous BAM output: {}", p.display());
-        Some(BamWriter::from_path(&p, header.clone()).map_err(|e| {
+        Some(BamWriter::from_path(&p, prov_header.clone()).map_err(|e| {
             AlignerError::Validation(format!("failed to open ambig BAM {p:?}: {e}"))
         })?)
     } else {
@@ -4463,6 +4503,10 @@ fn open_pe_sinks(
         unmapped_2,
         ambiguous_1,
         ambiguous_2,
+        provenance: Some((
+            bam_path.to_path_buf(),
+            crate::meta::provenance::stat_inputs([read_1, read_2]),
+        )),
     })
 }
 

@@ -130,28 +130,70 @@ pub fn write_provenance(output_dir: &Path, record: &ProvenanceRecord) {
     }
 }
 
-/// Append the one-line `@CO bismark_provenance …` header comment to a BAM header. noodles
-/// serializes `@CO` after `@PG`, so `@HD`/`@SQ`/`@PG` bytes are unchanged. Call at
-/// BAM-write time (never inside the frozen `generate_sam_header`).
-pub fn add_bam_provenance_comment(header: &mut Header, record: &ProvenanceRecord) {
-    header
-        .comments_mut()
-        .push(BString::from(bam_provenance_line(record)));
+/// Convenience: write the sidecar for a single primary output at `output_path`, recording
+/// `inputs`. Derives the sidecar's directory + name from `output_path`. Best-effort (see
+/// [`write_provenance`]).
+pub fn write_for_output(tool: &str, output_path: &Path, inputs: Vec<ProvenanceInput>) {
+    let primary_output = output_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let dir = output_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let record = ProvenanceRecord::new(tool, primary_output, inputs);
+    write_provenance(dir, &record);
+}
+
+/// Convenience: `stat` several input paths into [`ProvenanceInput`]s.
+pub fn stat_inputs<I, P>(paths: I) -> Vec<ProvenanceInput>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
+    paths
+        .into_iter()
+        .map(|p| ProvenanceInput::stat(p.as_ref()))
+        .collect()
+}
+
+/// Append the one-line `@CO bismark_provenance …` header comment for `tool` to a BAM
+/// header. The line is **run-level** (build-time consts + the process's argv/target and
+/// the wall clock) — it carries no per-output field, so it is added once to a header that
+/// several outputs may share. noodles serializes `@CO` after `@PG`, so `@HD`/`@SQ`/`@PG`
+/// bytes are unchanged. Call at BAM-write time (never inside the frozen
+/// `generate_sam_header`).
+pub fn add_bam_provenance(header: &mut Header, tool: &str) {
+    let line = provenance_line(
+        super::SUITE_VERSION,
+        super::GIT_SHORT_HASH,
+        super::BUILD_TIMESTAMP,
+        &now_iso8601_utc(),
+        tool,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        &std::env::args().collect::<Vec<_>>().join(" "),
+    );
+    header.comments_mut().push(BString::from(line));
 }
 
 /// The `@CO` comment body (without the `@CO\t` prefix noodles adds): a compact,
-/// human-readable subset of the sidecar record.
-fn bam_provenance_line(record: &ProvenanceRecord) -> String {
+/// human-readable subset of the sidecar record. Pure formatter for testability.
+#[allow(clippy::too_many_arguments)]
+fn provenance_line(
+    suite: &str,
+    git: &str,
+    built: &str,
+    run: &str,
+    tool: &str,
+    os: &str,
+    arch: &str,
+    argv: &str,
+) -> String {
     format!(
-        "bismark_provenance suite={} git={} built={} run={} tool={} os={}/{} argv=\"{}\"",
-        record.suite_version,
-        record.git_short_hash,
-        record.build_timestamp,
-        record.run_timestamp,
-        record.tool,
-        record.os,
-        record.arch,
-        record.command_line.join(" "),
+        "bismark_provenance suite={suite} git={git} built={built} run={run} tool={tool} \
+         os={os}/{arch} argv=\"{argv}\""
     )
 }
 
@@ -368,8 +410,17 @@ mod tests {
     }
 
     #[test]
-    fn bam_comment_line_shape() {
-        let line = bam_provenance_line(&fixed_record());
+    fn provenance_line_shape() {
+        let line = provenance_line(
+            "3.0.0",
+            "abc1234",
+            "2026-07-11T09:12:00Z",
+            "2026-07-11T14:03:11Z",
+            "bismark",
+            "linux",
+            "x86_64",
+            "bismark --genome /g reads.fq",
+        );
         assert_eq!(
             line,
             "bismark_provenance suite=3.0.0 git=abc1234 built=2026-07-11T09:12:00Z \
@@ -382,7 +433,7 @@ mod tests {
     fn bam_comment_added_after_pg() {
         // @CO must serialize last; the record stream + @HD/@SQ/@PG are unaffected.
         let mut header = Header::default();
-        add_bam_provenance_comment(&mut header, &fixed_record());
+        add_bam_provenance(&mut header, "bismark");
         assert_eq!(header.comments().len(), 1);
         assert!(header.comments()[0].starts_with(b"bismark_provenance "));
     }
