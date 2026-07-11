@@ -6,6 +6,8 @@
 //! [`version_line`] — distinct from each crate's internal Cargo version (which is
 //! reserved for the eventual crates.io publish at GA).
 
+pub mod provenance;
+
 /// The suite version, e.g. `2.0.0-beta.1` (the user-facing version).
 pub const SUITE_VERSION: &str = env!("BISMARK_SUITE_VERSION");
 /// Git short-hash of the build commit (or `unknown`).
