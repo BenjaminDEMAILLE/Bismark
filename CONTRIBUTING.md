@@ -45,6 +45,22 @@ optimised (see the [benchmarks](https://felixkrueger.github.io/Bismark/rust/benc
 changes to the Perl version will not be merged during the freeze; we would much rather see the same
 effort directed at the Rust suite, where it carries forward instead of into a frozen codebase.
 
+## Reproducibility checklist for the Rust suite
+
+Reproducibility is a design constraint, not an afterthought (see
+[Reproducibility by design](https://felixkrueger.github.io/Bismark/rust/reproducibility/)). Before
+opening a pull request against `master`, please confirm:
+
+- **Byte-identity is preserved.** A change to a faithful path must not alter a single output byte
+  versus Perl v0.25.1. Anything that cannot be byte-identical is an opt-in, never-silent,
+  concordance-gated flag, leaving the default path frozen.
+- **`cd rust && just` is green** (fmt, clippy with `-D warnings`, and tests in both profiles).
+- **`just reproduce` is bit-for-bit** if your change touches build inputs or dependencies.
+- **New tests exclude the provenance sidecar** from any whole-directory comparison (filter out
+  `*.bismark_provenance.json`), and use `<output>.bismark_provenance.json` only through the shared
+  helpers in `meta::provenance`.
+- **The status table and milestone log in `rust/README.md` are updated** when a tool's state changes.
+
 ## Getting in touch
 
 Please [open an issue](https://github.com/FelixKrueger/Bismark/issues) — the pinned freeze announcement

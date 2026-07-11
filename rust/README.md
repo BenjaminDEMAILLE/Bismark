@@ -149,6 +149,16 @@ cd rust
 cargo build --release
 ```
 
+## Reproducibility
+
+Reproducibility is a design constraint. Byte-identity to Perl v0.25.1 is a CI gate; external tool
+versions are pinned; builds are `SOURCE_DATE_EPOCH`-reproducible (`just reproduce`, gated in CI);
+every binary reports its true build via `--version`; and every primary output carries provenance both
+in a `<output>.bismark_provenance.json` sidecar and, for BAMs, an in-header `@CO bismark_provenance`
+line. `just smoke` runs the shipped fixtures end to end as a drift check. See
+[Reproducibility by design](https://felixkrueger.github.io/Bismark/rust/reproducibility/) for the
+full picture (including why on-disk `@PG` still reads `VN:v0.25.1`).
+
 ## Status
 
 One headline per module — current state at a glance. Per-crate detail lives in each crate's `README.md` / `CHANGELOG.md`; the dated shipping log is under [Milestones](#milestones). Rows are in rough pipeline order. State key: ✅ shipped on `master` · 🚧 in progress · ⬜ planned.

@@ -64,6 +64,7 @@ export default defineConfig({
             { label: 'Scope of the rewrite', slug: 'rust/overview' },
             { label: 'Choosing an alignment mode', slug: 'rust/choosing-an-alignment-mode' },
             { label: 'Benchmarks', slug: 'rust/benchmarks' },
+            { label: 'Reproducibility by design', slug: 'rust/reproducibility' },
           ],
         },
         {
