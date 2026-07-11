@@ -43,6 +43,16 @@ use smallvec::SmallVec;
 /// Concrete writer type returned by `crate::io::open_writer`.
 type Writer = AnyWriter<BufWriter<File>, File>;
 
+/// Clone the input `header` for the dedup output and stamp the always-on
+/// `@CO bismark_provenance …` line (reproducibility-by-design). Dedup never byte-compares
+/// the header (retained-qname set + report only), so this is byte-safe; and cloning the
+/// input header preserves any upstream `@CO` (e.g. the aligner's) → a provenance chain.
+fn provenance_output_header(header: &Header) -> Header {
+    let mut h = header.clone();
+    crate::meta::provenance::add_bam_provenance(&mut h, "deduplicate_bismark");
+    h
+}
+
 /// Build a chr-name → interned-u32 map from a SAM header's `@SQ` order.
 ///
 /// Interning is by chr-name **string** (not noodles refID), because in
@@ -309,7 +319,7 @@ pub fn run_single(
     file_label: String,
 ) -> Result<DedupReport, BismarkDedupError> {
     let mut reader = crate::io::open_reader(input, cram_ref)?;
-    let header = reader.header().clone();
+    let header = provenance_output_header(reader.header());
 
     // Zero alignment records (header-only BAM, e.g. nothing aligned) is handled
     // GRACEFULLY: the stream loop below is a no-op, `open_writer` + `finish`
@@ -404,7 +414,7 @@ pub fn run_multiple(
     // which dies on empty input; see
     // plans/06132026_dedup-empty-input/PLAN.md.
     // ────────────────────────────────────────────────────────────────
-    let mut writer = crate::io::open_writer(output, headers[0].clone(), cram_ref)?;
+    let mut writer = crate::io::open_writer(output, provenance_output_header(&headers[0]), cram_ref)?;
     let mut state = DedupState::new();
 
     let mut readers_iter = readers.into_iter();
@@ -480,7 +490,7 @@ pub fn run_single_parallel(
     parallel: std::num::NonZero<usize>,
 ) -> Result<DedupReport, BismarkDedupError> {
     let mut reader = crate::io::ThreadedBamReader::from_path(input, parallel)?;
-    let header = reader.header().clone();
+    let header = provenance_output_header(reader.header());
 
     // Zero records (header-only BAM) is handled gracefully — header-only output
     // + count=0 report + exit 0. See run_single / PLAN.md.
@@ -556,7 +566,7 @@ pub fn run_multiple_parallel(
     // the pop-first + subsequent-files `i = i_zero_based + 1` indexing below is
     // UNCHANGED so `refid_tables[i]` stays aligned with each reader. See
     // run_multiple / plans/06132026_dedup-empty-input/PLAN.md.
-    let mut writer = crate::io::ThreadedBamWriter::from_path(output, headers[0].clone(), parallel)?;
+    let mut writer = crate::io::ThreadedBamWriter::from_path(output, provenance_output_header(&headers[0]), parallel)?;
     let mut state = DedupState::new();
 
     let mut readers_iter = readers.drain(..);
@@ -816,7 +826,7 @@ pub fn run_single_umi(
 ) -> Result<DedupReport, BismarkDedupError> {
     let extractor = umi_extractor_for(umi_mode);
     let mut reader = crate::io::open_reader(input, cram_ref)?;
-    let header = reader.header().clone();
+    let header = provenance_output_header(reader.header());
 
     // Zero records (header-only BAM) is handled gracefully — header-only output
     // + count=0 report + exit 0. See run_single / PLAN.md.
@@ -885,7 +895,7 @@ pub fn run_multiple_umi(
         .map(|h| build_refid_table(h, &intern))
         .collect();
 
-    let mut writer = crate::io::open_writer(output, headers[0].clone(), cram_ref)?;
+    let mut writer = crate::io::open_writer(output, provenance_output_header(&headers[0]), cram_ref)?;
     let mut state = UmiDedupState::new();
 
     let mut readers_iter = readers.into_iter();
@@ -950,7 +960,7 @@ pub fn run_single_parallel_umi(
 ) -> Result<DedupReport, BismarkDedupError> {
     let extractor = umi_extractor_for(umi_mode);
     let mut reader = crate::io::ThreadedBamReader::from_path(input, parallel)?;
-    let header = reader.header().clone();
+    let header = provenance_output_header(reader.header());
 
     // Zero records (header-only BAM) is handled gracefully — header-only output
     // + count=0 report + exit 0. See run_single / PLAN.md.
@@ -1019,7 +1029,7 @@ pub fn run_multiple_parallel_umi(
         .map(|h| build_refid_table(h, &intern))
         .collect();
 
-    let mut writer = crate::io::ThreadedBamWriter::from_path(output, headers[0].clone(), parallel)?;
+    let mut writer = crate::io::ThreadedBamWriter::from_path(output, provenance_output_header(&headers[0]), parallel)?;
     let mut state = UmiDedupState::new();
 
     let mut readers_iter = readers.drain(..);

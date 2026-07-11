@@ -99,6 +99,11 @@ fn dir_snapshot(dir: &Path) -> BTreeMap<String, Vec<u8>> {
         let entry = entry.unwrap();
         if entry.file_type().unwrap().is_file() {
             let name = entry.file_name().to_string_lossy().into_owned();
+            // Exclude the reproducibility-by-design provenance sidecar: it varies between
+            // runs (run_timestamp) and is not part of the extractor's byte output.
+            if name.ends_with(".bismark_provenance.json") {
+                continue;
+            }
             map.insert(name, fs::read(entry.path()).unwrap());
         }
     }

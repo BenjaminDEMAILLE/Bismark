@@ -172,6 +172,23 @@ fn run(cli: Cli) -> Result<(), BismarkExtractorError> {
 /// construction (SPEC §9). The legacy single-threaded `extract_se` /
 /// `extract_pe` remain the byte-identity reference for the test suite.
 fn process_one_file(input: &Path, config: &ResolvedConfig) -> Result<(), BismarkExtractorError> {
+    extract_dispatch(input, config)?;
+    // Reproducibility-by-design: ONE run-level sidecar per input, keyed to the output stem
+    // (the extractor emits many files — context calls, splitting report, M-bias, and, with
+    // --bedGraph/--cytosine_report, the in-process cov/CX). The in-process coverage2cytosine
+    // step self-documents its report via its own sidecar (real command line, tool=c2c).
+    let anchor = config
+        .output_dir
+        .join(crate::extractor::pipeline::derive_basename(input));
+    crate::meta::provenance::write_for_output(
+        "bismark_methylation_extractor",
+        &anchor,
+        crate::meta::provenance::stat_inputs([input]),
+    );
+    Ok(())
+}
+
+fn extract_dispatch(input: &Path, config: &ResolvedConfig) -> Result<(), BismarkExtractorError> {
     match config.paired_mode {
         PairedMode::SingleEnd => extract_se_parallel(input, config),
         PairedMode::PairedEnd => extract_pe_parallel(input, config),

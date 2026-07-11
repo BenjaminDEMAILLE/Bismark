@@ -69,7 +69,7 @@ pub fn filter_one(
     // Open the reader + header. An I/O error here on a `.bam` file is
     // reported as truncation (Perl `bam_isTruncated`, noodles-native §4.2).
     let mut reader = bam::io::Reader::new(BufReader::new(File::open(infile)?));
-    let header = reader
+    let mut header = reader
         .read_header()
         .map_err(|e| map_initial_read_err(e, dotted_bam))?;
 
@@ -120,6 +120,11 @@ pub fn filter_one(
     let removed_path = filename::removed_bam_name(&infile_str);
     let report_path = filename::report_name(&infile_str);
 
+    // Reproducibility-by-design: always-on `@CO bismark_provenance …` in both output BAMs
+    // (byte-safe — the gate compares the BAM body only). Preserves any upstream @CO
+    // (aligner/dedup) copied from the input header → a provenance chain.
+    crate::meta::provenance::add_bam_provenance(&mut header, "filter_non_conversion");
+
     let mut kept_w = bam::io::Writer::new(File::create(&kept_path)?);
     kept_w.write_header(&header)?;
     let mut removed_w = bam::io::Writer::new(File::create(&removed_path)?);
@@ -160,6 +165,12 @@ pub fn filter_one(
         mode,
     };
     std::fs::write(&report_path, report.format())?;
+    // Reproducibility-by-design: sidecar next to the kept (filtered) BAM.
+    crate::meta::provenance::write_for_output(
+        "filter_non_conversion",
+        std::path::Path::new(&kept_path),
+        crate::meta::provenance::stat_inputs([infile]),
+    );
     Ok(report)
 }
 

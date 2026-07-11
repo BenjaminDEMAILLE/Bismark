@@ -36,6 +36,9 @@ fn list_sorted(dir: &Path) -> Vec<String> {
     let mut v: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
+        // Exclude the reproducibility-by-design provenance sidecar (a new file that Perl
+        // never wrote → not part of the byte-identity file-set comparison).
+        .filter(|n| !n.ends_with(".bismark_provenance.json"))
         .collect();
     v.sort();
     v

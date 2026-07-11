@@ -300,7 +300,17 @@ fn smoke_se_empty_bam_writes_only_header_files() {
     // Phase C.2 (#865): empty BAM → no records routed → every per-strand
     // file is empty after the run → all 12 are swept at finalize time.
     // Only the splitting-report and M-bias.txt survive.
-    let dir_entries: Vec<_> = fs::read_dir(&output_dir).unwrap().collect();
+    // Exclude the reproducibility-by-design provenance sidecar (written on the success
+    // path; a new file that is not part of this count).
+    let dir_entries: Vec<_> = fs::read_dir(&output_dir)
+        .unwrap()
+        .map(|e| e.unwrap())
+        .filter(|e| {
+            !e.file_name()
+                .to_string_lossy()
+                .ends_with(".bismark_provenance.json")
+        })
+        .collect();
     assert_eq!(
         dir_entries.len(),
         2,

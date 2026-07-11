@@ -106,6 +106,19 @@ pub fn run(cli: Cli) -> Result<(), GenomePrepError> {
         )?;
     }
 
+    // Reproducibility-by-design: one sidecar at the Bisulfite_Genome root (the "output" is
+    // a directory tree, not a single file). Kept OUT of the {CT,GA}_conversion subdirs so
+    // it never appears in the dirs other tools scan.
+    let prov_anchor = config
+        .genome_folder
+        .join("Bisulfite_Genome")
+        .join("bismark_genome_preparation");
+    crate::meta::provenance::write_for_output(
+        "bismark_genome_preparation",
+        &prov_anchor,
+        crate::meta::provenance::stat_inputs(&files),
+    );
+
     logger.note(
         "\n=========================================\n\nGenome preparation complete. Enjoy!\n",
     );

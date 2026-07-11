@@ -241,6 +241,12 @@ fn process_one(input: &Path, config: &ResolvedConfig) -> Result<(), BismarkDedup
     }
     report.write_to(&report_path)?;
     eprintln!("{}", report.format_stderr());
+    // Reproducibility-by-design: sidecar next to the deduplicated BAM.
+    crate::meta::provenance::write_for_output(
+        "deduplicate_bismark",
+        &out_path,
+        crate::meta::provenance::stat_inputs([input]),
+    );
     Ok(())
 }
 
@@ -331,6 +337,13 @@ fn process_multiple(config: &ResolvedConfig) -> Result<(), BismarkDedupError> {
     }
     report.write_to(&report_path)?;
     eprintln!("{}", report.format_stderr());
+    // Reproducibility-by-design: sidecar next to the combined deduplicated BAM (records
+    // every input file that fed the combined sample).
+    crate::meta::provenance::write_for_output(
+        "deduplicate_bismark",
+        &out_path,
+        crate::meta::provenance::stat_inputs(&config.files),
+    );
     Ok(())
 }
 

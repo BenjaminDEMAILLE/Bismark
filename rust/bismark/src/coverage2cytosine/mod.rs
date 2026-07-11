@@ -64,6 +64,12 @@ pub fn run(config: &ResolvedConfig) -> Result<(), BismarkC2cError> {
         return drach::run_drach(config, &genome);
     }
     report::run_report(config, &genome)?;
+    // Reproducibility-by-design: sidecar next to the genome-wide cytosine report.
+    crate::meta::provenance::write_for_output(
+        "coverage2cytosine",
+        &report::report_path(config, None),
+        crate::meta::provenance::stat_inputs([&config.cov_infile]),
+    );
     // Phase D: --merge_CpGs post-pass (re-reads the just-written CpG report).
     if config.merge_cpgs {
         merge::run_merge(config)?;

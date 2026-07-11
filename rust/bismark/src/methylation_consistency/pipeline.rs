@@ -65,18 +65,22 @@ impl BucketWriters {
     /// Open all three bucket BAMs adjacent to the input (via `root`), each
     /// with a clone of the verbatim input header.
     fn open(root: &str, chh: bool, header: &Header) -> Result<Self, MethConsError> {
+        // Reproducibility-by-design: always-on `@CO bismark_provenance …` in each bucket BAM
+        // (header not byte-compared; preserves any upstream @CO → a provenance chain).
+        let mut prov = header.clone();
+        crate::meta::provenance::add_bam_provenance(&mut prov, "methylation_consistency");
         Ok(Self {
             all_meth: BamWriter::from_path(
                 &filename::bucket_path(root, chh, Bucket::AllMeth),
-                header.clone(),
+                prov.clone(),
             )?,
             all_unmeth: BamWriter::from_path(
                 &filename::bucket_path(root, chh, Bucket::AllUnmeth),
-                header.clone(),
+                prov.clone(),
             )?,
             mixed: BamWriter::from_path(
                 &filename::bucket_path(root, chh, Bucket::Mixed),
-                header.clone(),
+                prov,
             )?,
         })
     }
@@ -154,7 +158,14 @@ fn process_file(
                 config.min_count,
                 config.chh,
             );
-            std::fs::write(filename::report_path(&root, config.chh), &body)?;
+            let report_out = filename::report_path(&root, config.chh);
+            std::fs::write(&report_out, &body)?;
+            // Reproducibility-by-design: sidecar next to the consistency report.
+            crate::meta::provenance::write_for_output(
+                "methylation_consistency",
+                std::path::Path::new(&report_out),
+                crate::meta::provenance::stat_inputs([path]),
+            );
             logger.summary(&file_label, &body);
             Ok(())
         }

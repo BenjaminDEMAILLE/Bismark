@@ -104,7 +104,14 @@ pub fn run(cli: Cli) -> Result<(), BismarkNomeError> {
     // opens the writer + writes the header BEFORE the read loop and `finish()`es
     // the encoder even on the empty-input error path, so Perl's header-only
     // `.gz` artifact still lands on disk.
-    crate::nome_filtering::nome::write_report(&cfg.input_path, &cfg.output_path, &genome)
+    crate::nome_filtering::nome::write_report(&cfg.input_path, &cfg.output_path, &genome)?;
+    // Reproducibility-by-design: sidecar next to the .manOwar.txt.gz report.
+    crate::meta::provenance::write_for_output(
+        "NOMe_filtering",
+        &cfg.output_path,
+        crate::meta::provenance::stat_inputs([&cfg.input_path]),
+    );
+    Ok(())
 }
 
 #[cfg(test)]

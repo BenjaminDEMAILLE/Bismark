@@ -172,6 +172,9 @@ fn dir_entries_sorted(dir: &Path) -> Vec<String> {
     let mut v: Vec<String> = fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        // Exclude the reproducibility-by-design provenance sidecar (a new file, not part of
+        // the extractor's emitted output-file set).
+        .filter(|n| !n.ends_with(".bismark_provenance.json"))
         .collect();
     v.sort();
     v

@@ -26,6 +26,9 @@ fn file_set(dir: &Path) -> BTreeSet<String> {
     std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        // Exclude the reproducibility-by-design provenance sidecar (new file, not part of
+        // the byte-identity file-set comparison).
+        .filter(|n| !n.ends_with(".bismark_provenance.json"))
         .collect()
 }
 

@@ -84,6 +84,14 @@ pub fn run(config: &ResolvedConfig) -> Result<(), BismarkBam2nucError> {
         let mut out = std::io::BufWriter::new(std::fs::File::create(&out_path)?);
         report::write_stats(&mut out, &sample, &genomic)?;
         out.flush()?;
+
+        // Reproducibility-by-design: sidecar next to the nucleotide-stats file (new file →
+        // the stats output is untouched).
+        crate::meta::provenance::write_for_output(
+            "bam2nuc",
+            std::path::Path::new(&out_path),
+            crate::meta::provenance::stat_inputs([infile]),
+        );
     }
 
     Ok(())
