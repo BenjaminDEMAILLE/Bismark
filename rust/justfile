@@ -6,7 +6,7 @@
 
 # Install/update config for the `install-suite*` recipes (bump `suite_tag` on release).
 repo := "https://github.com/FelixKrueger/Bismark"
-suite_tag := "bismark-rust-v2.0.0"
+suite_tag := "bismark-rust-v3.0.0"
 # Post-fold the whole suite is ONE crate — installing `bismark` yields all 12 binaries.
 suite_crates := "bismark"
 
@@ -86,6 +86,33 @@ reproduce:
         if cmp -s /tmp/bismark_repro1/$b /tmp/bismark_repro2/$b; then echo "✓ $b bit-identical"; \
         else echo "✗ $b DIFFERS"; fi; \
     done
+
+# Reproducibility smoke test (keynote "ship a sample + expected output"): genome-prep +
+# align the SHIPPED tiny fixtures (../test_files/) end-to-end, then assert the run
+# succeeds, the PE report carries its expected structure, and the always-on provenance
+# sidecar (with the true suite version) landed next to the BAM. Requires bowtie2 on PATH.
+# A fast "does the whole toolchain still work / has it silently drifted" check for users.
+smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --release -p bismark
+    work=/tmp/bismark_smoke
+    rm -rf "$work" && mkdir -p "$work/genome"
+    cp ../test_files/NC_010473.fa.gz "$work/genome/"
+    ./target/release/bismark_genome_preparation "$work/genome"
+    ./target/release/bismark --genome "$work/genome" \
+        -1 ../test_files/test_R1.fastq.gz -2 ../test_files/test_R2.fastq.gz -o "$work"
+    report=$(ls "$work"/*_PE_report.txt | head -1)
+    grep -q "Sequence pairs analysed in total:" "$report" \
+        || { echo "✗ smoke: report missing expected line"; exit 1; }
+    bam=$(ls "$work"/*_pe.bam | head -1)
+    side="$bam.bismark_provenance.json"
+    test -f "$side" || { echo "✗ smoke: provenance sidecar missing next to $bam"; exit 1; }
+    grep -q '"suite_version"' "$side" \
+        || { echo "✗ smoke: provenance sidecar malformed"; exit 1; }
+    echo "✓ smoke: end-to-end genome-prep + PE alignment OK"
+    echo "  report:    $report"
+    echo "  provenance: $side"
 
 # ── Apple Silicon perf helpers (aligner) ────────────────────────────────────
 # Discipline: profile -> prove byte-identity -> measure. See

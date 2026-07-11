@@ -9,6 +9,7 @@ on:
     paths:
       - "rust/**"
       - ".github/workflows/rust_ci.yml"
+  workflow_dispatch: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -218,3 +219,45 @@ jobs:
           if printf '%s\n' "$out" | grep -q '^skipping:'; then
             echo "::error::an oracle silently skipped"; exit 1
           fi
+
+  reproduce:
+    name: bit-for-bit reproducible build
+    # Reproducibility-by-design gate: build the whole suite TWICE under a fixed
+    # SOURCE_DATE_EPOCH and assert every binary is byte-identical (guards the cc/mimalloc
+    # C-dep + any future non-determinism). Two clean release builds are expensive, so this
+    # runs on PRs and manual dispatch only — NOT on every push. Mirrors `just reproduce`.
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.89"
+      - name: Build twice under a fixed SOURCE_DATE_EPOCH and diff every binary
+        run: |
+          set -euo pipefail
+          BINS="bismark deduplicate_bismark bismark_methylation_extractor \
+                bismark2bedGraph coverage2cytosine bismark_genome_preparation \
+                bam2nuc NOMe_filtering filter_non_conversion \
+                methylation_consistency bismark2report bismark2summary"
+          echo "Building the suite twice under SOURCE_DATE_EPOCH=1700000000..."
+          cargo clean
+          SOURCE_DATE_EPOCH=1700000000 cargo build --workspace --release
+          rm -rf /tmp/bismark_repro1 && cp -R target/release /tmp/bismark_repro1
+          cargo clean
+          SOURCE_DATE_EPOCH=1700000000 cargo build --workspace --release
+          rm -rf /tmp/bismark_repro2 && cp -R target/release /tmp/bismark_repro2
+          rc=0
+          for b in $BINS; do
+            if cmp -s "/tmp/bismark_repro1/$b" "/tmp/bismark_repro2/$b"; then
+              echo "✓ $b bit-identical"
+            else
+              echo "::error::$b differs between two SOURCE_DATE_EPOCH-pinned builds"; rc=1
+            fi
+          done
+          exit $rc
