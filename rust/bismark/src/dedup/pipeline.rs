@@ -414,7 +414,8 @@ pub fn run_multiple(
     // which dies on empty input; see
     // plans/06132026_dedup-empty-input/PLAN.md.
     // ────────────────────────────────────────────────────────────────
-    let mut writer = crate::io::open_writer(output, provenance_output_header(&headers[0]), cram_ref)?;
+    let mut writer =
+        crate::io::open_writer(output, provenance_output_header(&headers[0]), cram_ref)?;
     let mut state = DedupState::new();
 
     let mut readers_iter = readers.into_iter();
@@ -566,7 +567,11 @@ pub fn run_multiple_parallel(
     // the pop-first + subsequent-files `i = i_zero_based + 1` indexing below is
     // UNCHANGED so `refid_tables[i]` stays aligned with each reader. See
     // run_multiple / plans/06132026_dedup-empty-input/PLAN.md.
-    let mut writer = crate::io::ThreadedBamWriter::from_path(output, provenance_output_header(&headers[0]), parallel)?;
+    let mut writer = crate::io::ThreadedBamWriter::from_path(
+        output,
+        provenance_output_header(&headers[0]),
+        parallel,
+    )?;
     let mut state = DedupState::new();
 
     let mut readers_iter = readers.drain(..);
@@ -895,7 +900,8 @@ pub fn run_multiple_umi(
         .map(|h| build_refid_table(h, &intern))
         .collect();
 
-    let mut writer = crate::io::open_writer(output, provenance_output_header(&headers[0]), cram_ref)?;
+    let mut writer =
+        crate::io::open_writer(output, provenance_output_header(&headers[0]), cram_ref)?;
     let mut state = UmiDedupState::new();
 
     let mut readers_iter = readers.into_iter();
@@ -1029,7 +1035,11 @@ pub fn run_multiple_parallel_umi(
         .map(|h| build_refid_table(h, &intern))
         .collect();
 
-    let mut writer = crate::io::ThreadedBamWriter::from_path(output, provenance_output_header(&headers[0]), parallel)?;
+    let mut writer = crate::io::ThreadedBamWriter::from_path(
+        output,
+        provenance_output_header(&headers[0]),
+        parallel,
+    )?;
     let mut state = UmiDedupState::new();
 
     let mut readers_iter = readers.drain(..);
