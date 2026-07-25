@@ -78,10 +78,7 @@ impl BucketWriters {
                 &filename::bucket_path(root, chh, Bucket::AllUnmeth),
                 prov.clone(),
             )?,
-            mixed: BamWriter::from_path(
-                &filename::bucket_path(root, chh, Bucket::Mixed),
-                prov,
-            )?,
+            mixed: BamWriter::from_path(&filename::bucket_path(root, chh, Bucket::Mixed), prov)?,
         })
     }
 
